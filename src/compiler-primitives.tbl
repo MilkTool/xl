@@ -14,15 +14,15 @@
 //
 //
 // *****************************************************************************
-// This software is licensed under the GNU General Public License v3
-// (C) 2018-2019, Christophe de Dinechin <christophe@dinechin.org>
+// This software is licensed under the GNU General Public License v3+
+// (C) 2018-2020, Christophe de Dinechin <christophe@dinechin.org>
 // *****************************************************************************
 // This file is part of XL
 //
 // XL is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// the Free Software Foundation, either version 3 of the License,
+// or (at your option) any later version.
 //
 // XL is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -228,7 +228,7 @@ EXTERNAL(xl_integer2real,       treePtrTy,      treePtrTy)
 EXTERNAL(xl_array_index,        treePtrTy,      scopePtrTy, treePtrTy, treePtrTy)
 VA_EXTERNAL(xl_new_closure,     treePtrTy,      evalFnTy, treePtrTy, unsignedTy)
 EXTERNAL(xl_closure_code,       evalFnTy,       treePtrTy)
-EXTERNAL(xl_infix_name,         charPtrTy,      infixTreePtrTy);
+EXTERNAL(xl_infix_name,         charPtrTy,      infixTreePtrTy)
 
 
 

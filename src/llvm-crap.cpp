@@ -17,15 +17,15 @@
 //
 //
 // *****************************************************************************
-// This software is licensed under the GNU General Public License v3
-// (C) 2018-2019, Christophe de Dinechin <christophe@dinechin.org>
+// This software is licensed under the GNU General Public License v3+
+// (C) 2018-2020, Christophe de Dinechin <christophe@dinechin.org>
 // *****************************************************************************
 // This file is part of XL
 //
 // XL is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
+// the Free Software Foundation, either version 3 of the License,
+// or (at your option) any later version.
 //
 // XL is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -185,13 +185,11 @@
 
 #if LLVM_VERSION < 500
 #include "llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h"
-#else // LLVM_VERSION >= 500
+#elif LLVM_VERSION < 900
 # include "llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h"
-#endif // LLVM_VERSION 500
-
-#if LLVM_VERSION >= 600
-# include "llvm/ExecutionEngine/Orc/SymbolStringPool.h"
-#endif // LLVM_VERSION 600
+#else
+# include "llvm/ExecutionEngine/Orc/LLJIT.h"
+#endif
 
 // Finally, link everything together.
 // That, apart for the warnings, has remained somewhat stable
@@ -233,6 +231,7 @@ RECORDER(llvm_constants,        16, "LLVM constant values");
 RECORDER(llvm_builtins,         16, "LLVM builtin functions");
 RECORDER(llvm_modules,          16, "LLVM modules");
 RECORDER(llvm_globals,          16, "LLVM global variables");
+RECORDER(llvm_symbols,          16, "LLVM symbols");
 RECORDER(llvm_blocks,           16, "LLVM basic blocks");
 RECORDER(llvm_labels,           16, "LLVM labels for trees");
 RECORDER(llvm_calls,            16, "LLVM calls");
@@ -262,30 +261,31 @@ using namespace llvm::orc;
 #if LLVM_VERSION < 400
 typedef TargetAddress                                JITTargetAddress;
 #endif // LLVM_VERSION
+
 #if LLVM_VERSION < 500
 typedef std::unique_ptr<Module>                      Module_s;
-typedef ObjectLinkingLayer<>                         LinkingLayer;
-typedef IRCompileLayer<LinkingLayer>                 CompileLayer;
 #elif LLVM_VERSION < 700
 typedef std::shared_ptr<Module>                      Module_s;
-typedef RTDyldObjectLinkingLayer                     LinkingLayer;
-typedef IRCompileLayer<LinkingLayer, SimpleCompiler> CompileLayer;
 #elif LLVM_VERSION >= 700
 typedef std::unique_ptr<Module>                      Module_s;
-#if LLVM_VERSION < 800
+#endif // LLVM_VERSION 700
+
+#if LLVM_VERSION < 500
+typedef ObjectLinkingLayer<>                         LinkingLayer;
+typedef IRCompileLayer<LinkingLayer>                 CompileLayer;
+#elif LLVM_VERSION < 800
 typedef RTDyldObjectLinkingLayer                     LinkingLayer;
 typedef IRCompileLayer<LinkingLayer, SimpleCompiler> CompileLayer;
-#elif LLVM_VERSION >= 800
+#elif LLVM_VERSION < 900
 typedef LegacyRTDyldObjectLinkingLayer               LinkingLayer;
 typedef LegacyIRCompileLayer<LinkingLayer, SimpleCompiler> CompileLayer;
 #endif // LLVM_VERSION 800
-#endif // LLVM_VERSION >= 500
 typedef std::unique_ptr<TargetMachine>               TargetMachine_u;
 typedef std::shared_ptr<Function>                    Function_s;
 typedef std::function<Module_s(Module_s)>            Optimizer;
 #if LLVM_VERSION < 800
 typedef IRTransformLayer<CompileLayer, Optimizer>    OptimizeLayer;
-#elif LLVM_VERSION >= 800
+#elif LLVM_VERSION < 900
 typedef LegacyIRTransformLayer<CompileLayer, Optimizer> OptimizeLayer;
 #endif // LLVM_VERSION 800
 #if LLVM_VERSION < 380
@@ -366,13 +366,13 @@ class JITPrivate
 
     JITInitializer      initializer;
     unsigned            optLevel;
+#if LLVM_VERSION < 900
     LLVMContext         context;
+#endif
     TargetMachine_u     target;
     const DataLayout    layout;
+#if LLVM_VERSION < 900
 #if LLVM_VERSION >= 700
-#if LLVM_VERSION < 800
-    SymbolStringPool    strings;
-#endif // LLVM_VERSION 800
     ExecutionSession    session;
     typedef std::shared_ptr<SymbolResolver> SymbolResolver_s;
     SymbolResolver_s    resolver;
@@ -389,6 +389,13 @@ class JITPrivate
 #if LLVM_VERSION >= 380
     IndirectStubs_u     stubs;
 #endif // LLVM_VERSION
+#else
+    std::unique_ptr<LLLazyJIT> magic;
+    ExecutionSession &  session;
+    ThreadSafeContext   threadSafeContext;
+    LLVMContext &       context;
+    MangleAndInterner   mangle;
+#endif
 
     Module_s            module;
     ModuleHandle        moduleHandle;
@@ -409,6 +416,7 @@ private:
 
 
 
+#if LLVM_VERSION < 900
 static inline uint64_t globalSymbolAddress(const text &name)
 // ----------------------------------------------------------------------------
 //    Return the address of the symbol in the current address space
@@ -419,6 +427,7 @@ static inline uint64_t globalSymbolAddress(const text &name)
            name.c_str(), (void *) result);
     return result;
 }
+#endif // LLVM_VERSION < 900
 
 
 #if LLVM_VERSION >= 380
@@ -466,6 +475,7 @@ createLocalIndirectStubsManagerBuilder(const Triple &T)
 #endif // LLVM_VERSION < 390
 
 
+#if LLVM_VERSION < 900
 static inline IndirectStubs_u createStubs(TargetMachine &target)
 // ----------------------------------------------------------------------------
 //   Built a sstubs manager
@@ -474,9 +484,24 @@ static inline IndirectStubs_u createStubs(TargetMachine &target)
     auto b = createLocalIndirectStubsManagerBuilder(target.getTargetTriple());
     return b();
 }
+#endif // LLVM_VERSION < 900
+
 #endif // LLVM_VERSION >= 380
 
 
+#if LLVM_VERSION >= 900
+static ExitOnError exitOnError;
+static text llvmSymbolError = "";
+static void logErrorsToStdErr(llvm::Error err) {
+    if (llvmSymbolError.length())
+        llvmSymbolError += "\n";
+    llvmSymbolError += toString(std::move(err));
+    record(llvm_symbols, "Error: %s", llvmSymbolError);
+}
+#endif
+
+
+extern "C" Integer *xl_new_integer(TreePosition pos, longlong value);
 JITPrivate::JITPrivate(int argc, char **argv)
 // ----------------------------------------------------------------------------
 //   Constructor for JIT private helper
@@ -488,17 +513,17 @@ JITPrivate::JITPrivate(int argc, char **argv)
 // Yuck. Barf.
     : initializer(argc, argv),
       optLevel(3),
+#if LLVM_VERSION < 900
       context(),
+#endif
       target(EngineBuilder().selectTarget()),
       layout(target->createDataLayout()),
+#if LLVM_VERSION < 900
 #if LLVM_VERSION < 500
       linker(),
 #elif LLVM_VERSION < 700
       linker([]() { return std::make_shared<SectionMemoryManager>(); }),
 #else // LLVM_VERSION >= 700
-#if LLVM_VERSION < 800
-      strings(),
-#endif // LLVM_VERSION 800
       session(),
       resolver(createLegacyLookupResolver(
 #if LLVM_VERSION >= 700
@@ -556,10 +581,63 @@ JITPrivate::JITPrivate(int argc, char **argv)
 #endif // LLVM_VERSION 800
       stubs(createStubs(*target)),
 #endif // LLVM_VERSION 380
+#else // LLVM_VERSION >= 900
+      magic(exitOnError(LLLazyJITBuilder().create())),
+      session(magic->getExecutionSession()),
+#if LLVM_VERSION < 1000
+      threadSafeContext(make_unique<LLVMContext>()),
+#else // LLVM_VERSION >= 1000
+      threadSafeContext(std::make_unique<LLVMContext>()),
+#endif // LLVM_VERSION vs 1000
+      context(*threadSafeContext.getContext()),
+      mangle(session, layout),
+#endif // LLVM_VERSION >= 900
       module(),
       moduleHandle()
 {
     llvm::sys::DynamicLibrary::LoadLibraryPermanently(nullptr);
+
+#if LLVM_VERSION >= 900
+
+#ifdef XL_WHITELISTING
+    // The XL_WHITELISTING case will enforce a limited set of symbols.
+    // As a result, this will reject "extern" symbols (and fail some tests)
+    // Enable XL_WHITELISTING if you want a fully sandboxed version of XL
+    static DenseSet<SymbolStringPtr> whitelist({
+#define MTYPE(Name, Arity, Code)
+#define UNARY(Name)
+#define BINARY(Name)
+#define CAST(Name)
+#define ALIAS(Name, Arity, Original)
+#define SPECIAL(Name, Arity, Code)
+#define EXTERNAL(Name, RetTy, ...)      session.intern(Mangle(#Name)),
+#include "compiler-primitives.tbl"
+        });
+#endif
+
+    auto generator = DynamicLibrarySearchGenerator::GetForCurrentProcess(
+        layout.getGlobalPrefix(),
+        [&](const SymbolStringPtr &str)
+        {
+#ifdef XL_WHITELISTING
+            auto result = whitelist.count(str);
+#else // !XL_WHITELISTING
+            bool result = true;
+#endif // XL_WHITELISTING
+            record(llvm_symbols, "Whitelisting attempt %s = %u",
+                   text(*str), result);
+            return result;
+        });
+    if (generator)
+    {
+#if LLVM_VERSION < 1000
+        session.getMainJITDylib().setGenerator(*generator);
+#else // LLVM_VERSION >= 1000
+        magic->getMainJITDylib().addGenerator(std::move(*generator));
+#endif
+    }
+    session.setErrorReporter(logErrorsToStdErr);
+#endif // LLVM_VERSION >= 900
     record(llvm, "JITPrivate %p constructed", this);
 }
 
@@ -596,8 +674,10 @@ JIT::ModuleID JITPrivate::CreateModule(text name)
     module = llvm::make_unique<llvm::Module>(name, context);
 #elif LLVM_VERSION < 700
     module = std::make_shared<llvm::Module>(name, context);
-#elif LLVM_VERSION >= 700
+#elif LLVM_VERSION < 1000
     module = llvm::make_unique<llvm::Module>(name, context);
+#elif LLVM_VERSION >= 1000
+    module = std::make_unique<llvm::Module>(name, context);
 #endif // LLVM_VERSION 500
     record(llvm_modules, "Created module %p in %p", module.get(), this);
     module->setDataLayout(layout);
@@ -628,7 +708,7 @@ void JITPrivate::DeleteModule(JIT::ModuleID modID)
         optimizer.removeModuleSet(moduleHandle);
 #elif LLVM_VERSION < 600
         cantFail(optimizer.removeModule(moduleHandle));
-#else
+#elif LLVM_VERSION < 900
         cantFail(optimizer.removeModule(moduleHandle),
                  "Unable to remove module");
 #endif // LLVM_VERSION
@@ -739,10 +819,21 @@ JITSymbol JITPrivate::Symbol(text name)
 //   Return the symbol associated with the name
 // ----------------------------------------------------------------------------
 {
+    record(llvm_symbols, "Looking up %s", name);
 #if LLVM_VERSION < 380
     return lazyEmitter.findSymbol(Mangle(name), true);
-#else // LLVM_VERSION >= 380
+#elif LLVM_VERSION < 900
     return optimizer.findSymbol(Mangle(name), true);
+#elif LLVM_VERSION >= 900
+    auto sym = magic->lookup(name);
+    if (!sym)
+    {
+        Ooops("Generating machine code for $1 failed: $2")
+            .Arg(name, "'")
+            .Arg(toString(sym.takeError()), "");
+        return JITSymbol(nullptr);
+    }
+    return *sym;
 #endif // LLVM_VERSION 380
 }
 
@@ -824,15 +915,42 @@ JITTargetAddress JITPrivate::Address(text name)
 # endif // LLVM_VERSION 500
 
 #else // LLVM_VERSION >= 700
+#if LLVM_VERSION < 900
     if (module.get())
         cantFail(optimizer.addModule(moduleHandle, std::move(module)));
 # define hadError(r)    (!(r))
-# define errorMsg(r)    (toString((r).takeError()))
+# define errorMsg(r)    toString((r).takeError())
+#elif LLVM_VERSION >= 900
+# define hadError(r)    (!(r) || llvmSymbolError.length())
+# define errorMsg(r)    (llvmSymbolError.length()                       \
+                         ? llvmSymbolError                              \
+                         : toString((r).takeError()));                  \
+                        llvmSymbolError = ""
+    if (module.get())
+    {
+        ThreadSafeModule tsm(std::move(module), threadSafeContext);
+        llvm::Error error = magic->addIRModule(std::move(tsm));
+        if (error)
+        {
+            record(llvm_modules, "Module error %s", llvmSymbolError);
+            text message = (llvmSymbolError.length()
+                            ? llvmSymbolError
+                            : toString(std::move(error)));
+            llvmSymbolError = "";
+            Ooops("Inserting module for $1 failed: $2")
+                .Arg(name, "'")
+                .Arg(message, "");
+            return 0;
+        }
+    }
+#endif
 #endif // LLVM_VERSION < 700
+
     auto r = Symbol(name).getAddress();
     if (hadError(r))
     {
         text message = errorMsg(r);
+        record(llvm_symbols, "Symbol error %s", message);
         Ooops("Generating machine code for $1 failed: $2")
             .Arg(name, "'")
             .Arg(message, "");
@@ -869,6 +987,9 @@ JIT::JIT(int argc, char **argv)
     recorder_type_fn print_type = recorder_render<raw_string_ostream,Type_p>;
     recorder_configure_type('v', print_value);
     recorder_configure_type('T', print_type);
+#if LLVM_VERSION >= 900
+    exitOnError.setBanner(text(argv[0]) + " error:");
+#endif
 }
 
 
@@ -1122,7 +1243,7 @@ JIT::Function_p JIT::Function(JIT::FunctionType_p type, text name)
     JIT::Function_p f = llvm::Function::Create(type,
                                                llvm::Function::ExternalLinkage,
                                                name, module);
-    record(llvm_functions, "Created function %v type %v in module %p",
+    record(llvm_functions, "Created function %v type %T in module %p",
            f, type, p.Module());
 
     return f;
@@ -1144,7 +1265,11 @@ void *JIT::ExecutableCode(JIT::Function_p f)
 //   Return an executable pointer to the function
 // ----------------------------------------------------------------------------
 {
+#if LLVM_VERSION < 1100
     JITTargetAddress address = p.Address(f->getName());
+#else // LLVM_VERSION >= 1100
+    JITTargetAddress address = p.Address(f->getName().str());
+#endif // LLVM_VERSION
     record(llvm_functions, "Address of %v is %p", f, (void *) address);
     return (void *) address;
 }
@@ -1171,7 +1296,11 @@ JIT::Function_p JIT::Prototype(JIT::Function_p function)
 //   If the function is in this module, return it, else return prototype for it
 {
     JIT::Module_p module = p.Module();
+#if LLVM_VERSION < 1100
     text          name   = function->getName();
+#else // LLVM_VERSION >= 1100
+    text          name   = function->getName().str();
+#endif
 
     // First check if we don't already have it in the current module
     if (module)
@@ -1188,8 +1317,7 @@ JIT::Function_p JIT::Prototype(JIT::Function_p function)
     FunctionType_p type = function->getFunctionType();
     Function_p proto = llvm::Function::Create(type,
                                               llvm::Function::ExternalLinkage,
-                                              name,
-                                              module);
+                                              name, module);
     record(llvm_prototypes, "Created prototype %v for %v type %T in module %p",
            proto, function, type, module);
     return proto;
@@ -1463,13 +1591,38 @@ void JITBlock::SwitchTo(JIT::BasicBlock_p block)
 }
 
 
+#if LLVM_VERSION < 1100
+#define Callee(V)       (V)
+#else // LLVM_VERSION >= 1100
+static inline llvm::FunctionCallee Callee(JIT::Value_p callee)
+// ----------------------------------------------------------------------------
+//   Another totally useless wrapper with more damage to come
+// ----------------------------------------------------------------------------
+{
+    JIT::Type_p type = callee->getType();
+    if (type->isFunctionTy())
+    {
+        JIT::FunctionType_p ftype = (JIT::FunctionType_p) type;
+        return llvm::FunctionCallee(ftype, callee);
+    }
+
+    assert(type->isPointerTy() && "Callee requires a callable value");
+    JIT::PointerType_p ptype = (JIT::PointerType_p) type;
+    type = ptype->getElementType();
+    assert(type->isFunctionTy() && "Callee require function type for callee");
+    JIT::FunctionType_p ftype = (JIT::FunctionType_p) type;
+    return llvm::FunctionCallee(ftype, callee);
+}
+#endif
+
+
 JIT::Value_p JITBlock::Call(JIT::Value_p callee, JIT::Value_p arg1)
 // ----------------------------------------------------------------------------
 //   Create a call with one argument
 // ----------------------------------------------------------------------------
 {
     JIT::Value_p proto = b.jit.Prototype(callee);
-    JIT::Value_p result = b->CreateCall(proto, {arg1});
+    JIT::Value_p result = b->CreateCall(Callee(proto), {arg1});
     record(llvm_ir, "Call %v(%v) = %v", callee, arg1, result);
     return result;
 }
@@ -1483,7 +1636,7 @@ JIT::Value_p JITBlock::Call(JIT::Value_p callee,
 // ----------------------------------------------------------------------------
 {
     JIT::Value_p proto = b.jit.Prototype(callee);
-    JIT::Value_p result = b->CreateCall(proto, {arg1, arg2});
+    JIT::Value_p result = b->CreateCall(Callee(proto), {arg1, arg2});
     record(llvm_ir, "Call %v(%v, %v) = %v", callee, arg1, arg2, result);
     return result;
 }
@@ -1498,7 +1651,7 @@ JIT::Value_p JITBlock::Call(JIT::Value_p callee,
 // ----------------------------------------------------------------------------
 {
     JIT::Value_p proto = b.jit.Prototype(callee);
-    JIT::Value_p result = b->CreateCall(proto, {arg1, arg2, arg3});
+    JIT::Value_p result = b->CreateCall(Callee(proto), {arg1, arg2, arg3});
     record(llvm_ir, "Call %v(%v, %v, %v) = %v", callee, arg1,arg2,arg3, result);
     return result;
 }
@@ -1511,7 +1664,8 @@ JIT::Value_p JITBlock::Call(JIT::Value_p callee,
 // ----------------------------------------------------------------------------
 {
     JIT::Value_p proto = b.jit.Prototype(callee);
-    JIT::Value_p result = b->CreateCall(proto, ArrayRef<JIT::Value_p>(args));
+    JIT::Value_p result = b->CreateCall(Callee(proto),
+                                        ArrayRef<JIT::Value_p>(args));
     record(llvm_ir, "Call %v(#%u) = %v", callee, args.size(), result);
     return result;
 }
